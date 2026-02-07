@@ -1,84 +1,116 @@
 #!/usr/bin/env python3
-"""
-module_stt.py - Versión Lite para Raspberry Pi 4 (Espejo)
-Eliminadas todas las dependencias pesadas (Torch, FastRTC) para evitar 'Illegal Instruction'.
-"""
-
-import os
 import threading
 import time
-import queue
 import numpy as np
 import sounddevice as sd
-from openai import OpenAI
 import soundfile as sf
-
-# Importamos utilidades básicas
-from modules.module_messageQue import queue_message
+import io
+import os
 from modules.module_config import load_config
+from modules.module_messageQue import queue_message
 
-CONFIG = load_config()
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 class STTManager:
-    def __init__(self, config, shutdown_event: threading.Event, ui_manager, amp_gain: float = 1.0):
+    def __init__(self, config, shutdown_event, ui_manager, amp_gain=1.0):
         self.config = config
         self.shutdown_event = shutdown_event
         self.ui_manager = ui_manager
         self.running = False
-        
-        # Configuración de Audio (Estándar para Pi 4)
-        self.SAMPLE_RATE = 16000
-        self.CHANNELS = 1
-        self.DTYPE = 'int16'
-        
-        # Callbacks
-        self.wake_word_callback = None
         self.utterance_callback = None
-        self.post_utterance_callback = None # Añadido para compatibilidad
-        
-        # Cliente OpenAI (Usaremos la nube para no quemar la CPU)
-        api_key = self.config['STT'].get('openai_api_key', os.environ.get("OPENAI_API_KEY"))
-        self.client = OpenAI(api_key=api_key) if api_key else None
+        self.fs = 16000
+        self.channels = 1
+        self.threshold = 0.05  # Umbral subido para evitar ruidos
+        self.silence_limit = 1.2
+        self.amp_gain = amp_gain
+        self.current_recording = []
 
-    def _listen_loop(self):
-        """Bucle simple: Mantiene el hilo vivo sin consumir CPU excesiva"""
-        queue_message("INFO: STT (Modo Espejo Pi4) Iniciado.")
-        
-        # Aquí implementaremos la escucha real más adelante.
-        # Por ahora, un bucle de espera para que no de error al arrancar.
-        while self.running and not self.shutdown_event.is_set():
-            time.sleep(1)
-
-    # === Métodos de Control ===
     def start(self):
         self.running = True
-        self.thread = threading.Thread(target=self._listen_loop, daemon=True)
-        self.thread.start()
+        queue_message("EAR: Inicializando HAT WM8960...")
+        threading.Thread(target=self._listen_loop, daemon=True).start()
 
-    def stop(self):
-        self.running = False
-        if hasattr(self, 'thread'):
-            self.thread.join(timeout=1)
+    def _listen_loop(self):
+        audio_buffer = []
+        is_recording = False
+        silence_start = None
+        
+        # Forzamos el ID 1 que es tu HAT WM8960
+        device_id = 1
+        
+        tts_conf = self.config['TTS']
+        api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
 
-    # === Setters (Para que app.py no se queje) ===
-    def set_wake_word_callback(self, callback):
-        self.wake_word_callback = callback
+        client = None
+        if OpenAI and api_key:
+            client = OpenAI(api_key=api_key)
+        else:
+            print("EAR ERROR: No API Key")
+            return
 
-    def set_utterance_callback(self, callback):
-        self.utterance_callback = callback
-    
-    def set_post_utterance_callback(self, callback):
-        self.post_utterance_callback = callback
-    
-    # === Utilidades Dummy ===
-    def play_wav(self, filename):
-        """Reproduce sonido de forma segura"""
+        def callback(indata, frames, time, status):
+            audio_buffer.append(indata.copy())
+
         try:
-            data, fs = sf.read(filename)
-            sd.play(data, fs)
-            sd.wait()
+            with sd.InputStream(samplerate=self.fs, channels=self.channels, 
+                              device=device_id, callback=callback):
+                print(f"EAR: Micrófono del HAT WM8960 abierto (ID: {device_id})")
+                while self.running and not self.shutdown_event.is_set():
+                    if not audio_buffer:
+                        time.sleep(0.1)
+                        continue
+                    while audio_buffer:
+                        chunk = audio_buffer.pop(0)
+                        volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
+                        if volume > self.threshold:
+                            if not is_recording:
+                                print(f"🎤 ESCUCHANDO... (Vol: {volume:.4f})")
+                                is_recording = True
+                                self.current_recording = [chunk]
+                            else:
+                                self.current_recording.append(chunk)
+                            silence_start = None
+                        elif is_recording:
+                            self.current_recording.append(chunk)
+                            if silence_start is None:
+                                silence_start = time.time()
+                            elif time.time() - silence_start > self.silence_limit:
+                                print("🛑 PROCESANDO VOZ...")
+                                is_recording = False
+                                self._transcribe(self.current_recording, client)
+                                self.current_recording = []
+                    time.sleep(0.01)
         except Exception as e:
-            print(f"Error audio: {e}")
+            print(f"EAR ERROR: {e}")
 
-    def stop_generation(self):
-        pass
+    def _transcribe(self, audio_data, client):
+        if not audio_data: return
+        recording = np.concatenate(audio_data, axis=0)
+        buffer = io.BytesIO()
+        buffer.name = 'audio.wav'
+        sf.write(buffer, recording, self.fs)
+        buffer.seek(0)
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=buffer, 
+                language="es",
+                initial_prompt="TARS, inteligencia artificial, sarcasmo, humor, cooperativo."
+            )
+            text = transcript.text
+            print(f"🗣️ TARS ENTENDIÓ: '{text}'")
+            if self.utterance_callback:
+                self.utterance_callback(text)
+        except Exception as e:
+            print(f"Error Whisper: {e}")
+
+    def stop(self): self.running = False
+    def set_wake_word_callback(self, cb): pass
+    def set_utterance_callback(self, cb): self.utterance_callback = cb
+    def set_post_utterance_callback(self, cb): pass
+    def play_wav(self, f): pass
+    def pause(self): pass
+    def resume(self): pass
