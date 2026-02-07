@@ -2,8 +2,6 @@
 import os
 import io
 import asyncio
-import numpy as np
-import sounddevice as sd
 import soundfile as sf
 from openai import OpenAI
 from modules.module_config import load_config
@@ -30,31 +28,21 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
             input=text
         )
         
-        # Leemos el audio de OpenAI
-        data, fs = sf.read(io.BytesIO(response.content))
+        # 1. Guardar temporalmente el MP3 de OpenAI
+        with open("temp.mp3", "wb") as f:
+            f.write(response.content)
 
-        # EL TRUCO: El HAT WM8960 suele preferir 44100Hz o 48000Hz. 
-        # OpenAI manda 24000Hz por defecto.
-        # Si sounddevice falla con el ID: 1, probaremos sin especificar el ID 
-        # pero forzando el mapeo a la tarjeta WM8960.
-        
-        print(f"🔈 Reproduciendo a {fs}Hz...")
-        
-        # Intentamos reproducir. Si falla el sample rate, el sistema operativo
-        # debería re-muestrear si usamos el dispositivo por nombre o el ID correcto.
-        sd.play(data, fs, device=1)
-        sd.wait()
+        # 2. Convertirlo a WAV de 44100Hz (frecuencia que ama el HAT)
+        # Usamos ffmpeg para asegurar que el formato sea perfecto
+        os.system("ffmpeg -y -i temp.mp3 -ar 44100 -ac 2 temp.wav > /dev/null 2>&1")
+
+        # 3. Reproducir usando aplay (el estándar más bajo nivel de Linux)
+        # hw:1,0 es tu HAT WM8960
+        print("🔈 Reproduciendo por el HAT...")
+        os.system("aplay -D hw:1,0 temp.wav > /dev/null 2>&1")
         
     except Exception as e:
         print(f"TTS ERROR: {e}")
-        print("Intentando método de emergencia (aplay)...")
-        # Si falla sounddevice, intentamos usar el comando del sistema
-        try:
-            with open("temp.mp3", "wb") as f:
-                f.write(response.content)
-            os.system("mpg123 -D hw:1,0 temp.mp3") 
-        except:
-            pass
 
 def update_tts_settings(url):
     pass
