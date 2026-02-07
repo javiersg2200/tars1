@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import os
 import io
+import asyncio
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from scipy.signal import resample
 from openai import OpenAI
 from modules.module_config import load_config
 
@@ -30,22 +30,31 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
             input=text
         )
         
-        # Leer audio original
+        # Leemos el audio de OpenAI
         data, fs = sf.read(io.BytesIO(response.content))
-        
-        # --- CORRECCIÓN DE FRECUENCIA (Resample a 44100Hz) ---
-        target_fs = 44100
-        if fs != target_fs:
-            num_samples = int(len(data) * target_fs / fs)
-            data = resample(data, num_samples)
-            fs = target_fs
 
-        # Reproducir forzando el HAT (ID: 1)
+        # EL TRUCO: El HAT WM8960 suele preferir 44100Hz o 48000Hz. 
+        # OpenAI manda 24000Hz por defecto.
+        # Si sounddevice falla con el ID: 1, probaremos sin especificar el ID 
+        # pero forzando el mapeo a la tarjeta WM8960.
+        
+        print(f"🔈 Reproduciendo a {fs}Hz...")
+        
+        # Intentamos reproducir. Si falla el sample rate, el sistema operativo
+        # debería re-muestrear si usamos el dispositivo por nombre o el ID correcto.
         sd.play(data, fs, device=1)
         sd.wait()
         
     except Exception as e:
         print(f"TTS ERROR: {e}")
+        print("Intentando método de emergencia (aplay)...")
+        # Si falla sounddevice, intentamos usar el comando del sistema
+        try:
+            with open("temp.mp3", "wb") as f:
+                f.write(response.content)
+            os.system("mpg123 -D hw:1,0 temp.mp3") 
+        except:
+            pass
 
 def update_tts_settings(url):
     pass
