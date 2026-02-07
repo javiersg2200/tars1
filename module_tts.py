@@ -10,7 +10,6 @@ from modules.module_config import load_config
 CONFIG = load_config()
 
 def get_openai_client():
-    # Acceso seguro al objeto de configuración
     tts_conf = CONFIG['TTS']
     api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
     if api_key:
@@ -32,8 +31,12 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
             input=text
         )
         data, fs = sf.read(io.BytesIO(response.content))
-        # Dispositivo 1 es el HAT WM8960
+        # Dispositivo 1 es el HAT WM8960 según tu amixer
         sd.play(data, fs, device=1)
         sd.wait()
     except Exception as e:
         print(f"TTS ERROR: {e}")
+
+# Añadimos la función que faltaba para evitar el ImportError
+def update_tts_settings(url):
+    pass
