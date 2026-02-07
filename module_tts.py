@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import os
 import io
-import asyncio
+import numpy as np
 import sounddevice as sd
 import soundfile as sf
+from scipy.signal import resample
 from openai import OpenAI
 from modules.module_config import load_config
 
@@ -19,9 +20,7 @@ def get_openai_client():
 async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
     if not text: return
     client = get_openai_client()
-    if not client: 
-        print("TTS: No se pudo conectar con OpenAI (falta API Key)")
-        return
+    if not client: return
 
     try:
         print(f"🔊 Generando voz para: {text[:30]}...")
@@ -30,13 +29,23 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
             voice="onyx", 
             input=text
         )
+        
+        # Leer audio original
         data, fs = sf.read(io.BytesIO(response.content))
-        # Dispositivo 1 es el HAT WM8960 según tu amixer
+        
+        # --- CORRECCIÓN DE FRECUENCIA (Resample a 44100Hz) ---
+        target_fs = 44100
+        if fs != target_fs:
+            num_samples = int(len(data) * target_fs / fs)
+            data = resample(data, num_samples)
+            fs = target_fs
+
+        # Reproducir forzando el HAT (ID: 1)
         sd.play(data, fs, device=1)
         sd.wait()
+        
     except Exception as e:
         print(f"TTS ERROR: {e}")
 
-# Añadimos la función que faltaba para evitar el ImportError
 def update_tts_settings(url):
     pass
