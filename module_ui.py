@@ -1,133 +1,117 @@
 #!/usr/bin/env python3
-"""
-module_ui.py - TARS Mirror UI (Safe Mode)
-Versión ligera que solo usa Pygame (sin OpenCV ni cámaras) para evitar crasheos.
-"""
+import os
+import sys
+
+# --- PARCHES DE VIDEO PARA RASPBERRY PI 4 / VNC ---
+# Forzamos el uso de X11 (el sistema de ventanas clásico) en lugar de Wayland
+os.environ["SDL_VIDEODRIVER"] = "x11"
+# Forzamos el renderizado por software (CPU) para evitar errores de GPU/OpenGL
+os.environ["SDL_RENDER_DRIVER"] = "software"
+# Centramos la ventana
+os.environ["SDL_VIDEO_CENTERED"] = "1"
 
 import pygame
-import time
 import threading
-import os
-from modules.module_config import load_config
-
-CONFIG = load_config()
+import time
 
 # Colores TARS
-BLUE_TARS = (10, 20, 40)       # Fondo oscuro
-BLUE_BLOCK = (60, 90, 160)     # Bloques inactivos
-BLUE_ACTIVE = (100, 150, 255)  # Bloques activos (hablando)
-WHITE = (200, 220, 255)        # Texto
+BLUE_BG = (10, 20, 40)
+BLUE_BLOCK = (60, 90, 160)
+BLUE_ACTIVE = (100, 150, 255)
+WHITE = (200, 200, 200)
 
 class UIManager(threading.Thread):
     def __init__(self, shutdown_event, battery_module=None, cpu_temp_module=None):
         super().__init__()
         self.shutdown_event = shutdown_event
-        self.battery = battery_module
-        self.cpu = cpu_temp_module
         self.daemon = True
         self.running = True
-        
-        # Estado
         self.status_text = "TARS ONLINE"
-        self.sub_text = "Listening..."
-        self.source = "SYSTEM"
+        self.sub_text = "System Ready"
         self.is_speaking = False
         
-        # Configuración Pygame (Sin marco para espejo)
-        os.environ["SDL_VIDEO_CENTERED"] = "1"
-        pygame.init()
-        
-        # Detectar pantalla
-        info = pygame.display.Info()
-        self.width = info.current_w
-        self.height = info.current_h
-        
-        # Modo pantalla completa real
-        self.screen = pygame.display.set_mode((self.width, self.height), pygame.NOFRAME)
-        pygame.display.set_caption("TARS Mirror")
-        
-        # Fuentes
+        # Inicializar Pygame sin modos acelerados
         try:
-            self.font_big = pygame.font.SysFont("Arial", 40, bold=True)
-            self.font_small = pygame.font.SysFont("Arial", 20)
-        except:
-            self.font_big = pygame.font.Font(None, 50)
+            pygame.init()
+            
+            # Detectar tamaño de pantalla
+            info = pygame.display.Info()
+            self.width = info.current_w
+            self.height = info.current_h
+            
+            # Crear ventana SIN MARCO (NOFRAME)
+            # No usamos FULLSCREEN para evitar bloqueos en VNC
+            self.screen = pygame.display.set_mode((self.width, self.height), pygame.NOFRAME)
+            pygame.display.set_caption("TARS Mirror")
+            
+            # Fuente
+            self.font = pygame.font.Font(None, 50)
             self.font_small = pygame.font.Font(None, 30)
+            
+        except Exception as e:
+            print(f"CRITICAL UI ERROR: {e}")
+            self.running = False
 
     def update_data(self, source, message, category="INFO"):
-        """Actualiza el texto en pantalla"""
-        self.source = source
-        self.status_text = message[:100] # Cortar si es muy largo
+        self.status_text = message[:60]
+        self.sub_text = f"[{source}]"
+        
         if category == "TARS":
             self.is_speaking = True
-            # Resetear estado de habla tras unos segundos (truco visual)
+            # Dejar de "hablar" visualmente tras 2 segundos
             threading.Timer(2.0, self._stop_speaking).start()
-        elif category == "USER":
-            self.sub_text = "Processing..."
 
     def _stop_speaking(self):
         self.is_speaking = False
 
     def run(self):
+        if not self.running: return
+        
         clock = pygame.time.Clock()
         
         while self.running and not self.shutdown_event.is_set():
+            # Procesar eventos (clics, teclas)
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.shutdown_event.set()
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.shutdown_event.set()
+                if event.type == pygame.QUIT: self.shutdown_event.set()
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE: self.shutdown_event.set()
 
-            # 1. Fondo
-            self.screen.fill(BLUE_TARS)
+            # 1. Limpiar pantalla
+            self.screen.fill(BLUE_BG)
             
-            # 2. Bloques Centrales (Animación simple)
-            center_x = self.width // 2
-            center_y = self.height // 2
+            # 2. Dibujar Bloques (Interfaz TARS)
+            cx, cy = self.width // 2, self.height // 2
             
-            # Bloque 1 (Izquierda)
-            rect1 = pygame.Rect(center_x - 160, center_y - 50, 100, 100)
-            color1 = BLUE_ACTIVE if self.is_speaking else BLUE_BLOCK
-            pygame.draw.rect(self.screen, color1, rect1, border_radius=5)
+            # Color de los bloques (Brillan si habla)
+            block_color = BLUE_ACTIVE if self.is_speaking else BLUE_BLOCK
             
-            # Bloque 2 (Centro)
-            rect2 = pygame.Rect(center_x - 50, center_y - 50, 100, 100)
-            color2 = BLUE_BLOCK
-            pygame.draw.rect(self.screen, color2, rect2, border_radius=5)
+            # Bloque Izq
+            pygame.draw.rect(self.screen, block_color, (cx - 160, cy - 50, 100, 150), border_radius=5)
+            # Bloque Centro
+            pygame.draw.rect(self.screen, BLUE_BLOCK, (cx - 50, cy - 50, 100, 150), border_radius=5)
+            # Bloque Der
+            pygame.draw.rect(self.screen, block_color, (cx + 60, cy - 50, 100, 150), border_radius=5)
             
-            # Bloque 3 (Derecha)
-            rect3 = pygame.Rect(center_x + 60, center_y - 50, 100, 100)
-            color3 = BLUE_ACTIVE if self.is_speaking else BLUE_BLOCK
-            pygame.draw.rect(self.screen, color3, rect3, border_radius=5)
+            # 3. Textos
+            # Texto Principal (Centro)
+            text_surf = self.font.render(self.status_text, True, WHITE)
+            self.screen.blit(text_surf, (cx - text_surf.get_width()//2, cy - 100))
+            
+            # Texto Secundario (Esquina)
+            sub_surf = self.font_small.render(self.sub_text, True, (100, 200, 100))
+            self.screen.blit(sub_surf, (20, 20))
 
-            # 3. Texto Principal
-            text_surf = self.font_big.render(self.status_text, True, WHITE)
-            text_rect = text_surf.get_rect(center=(center_x, center_y + 100))
-            self.screen.blit(text_surf, text_rect)
-            
-            # 4. Texto Secundario (Source)
-            src_surf = self.font_small.render(f"[{self.source}]", True, (150, 150, 150))
-            self.screen.blit(src_surf, (20, 20))
-
-            # 5. Info Técnica (Temp/Batería)
-            if self.cpu:
-                temp = self.cpu.get_temperature()
-                temp_surf = self.font_small.render(f"CPU: {temp:.1f}°C", True, (100, 255, 100))
-                self.screen.blit(temp_surf, (self.width - 120, 20))
-
+            # 4. Actualizar pantalla
             pygame.display.flip()
-            clock.tick(15) # 15 FPS para no quemar CPU
+            
+            # 5. Limitar FPS para no calentar la CPU
+            clock.tick(10)
 
         pygame.quit()
 
-    def stop(self):
-        self.running = False
-        self.join()
-
-    # Métodos dummy
+    # Métodos dummy para compatibilidad
+    def stop(self): self.running = False
     def deactivate_screensaver(self): pass
-    def silence(self, frames): pass
+    def silence(self, x): pass
     def think(self): pass
     def pause(self): pass
     def resume(self): pass
