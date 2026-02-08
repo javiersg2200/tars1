@@ -2,10 +2,10 @@
 import threading
 import time
 import numpy as np
-import subprocess
+import sounddevice as sd
+import soundfile as sf
 import io
 import os
-import soundfile as sf
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 import modules.tars_status as status 
@@ -22,15 +22,17 @@ class STTManager:
         self.ui_manager = ui_manager
         self.running = False
         
-        self.rate = 44100
-        self.chunk_size = 4096 
-        self.threshold = 500  # Umbral para enteros (arecord usa int16, valores de 0 a 32000)
+        self.fs = 44100 
+        self.channels = 2 
+        # Umbral ajustado para tu voz
+        self.threshold = 0.15 
         self.silence_limit = 1.2
+        self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Modo Nativo (arecord pipe)")
+        queue_message("EAR: Sistema Walkie-Talkie (Con Pausa de Seguridad)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -38,98 +40,94 @@ class STTManager:
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
         client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
 
-        process = None
-        is_recording = False
-        silence_start = None
-
-        print("EAR: 👂 Iniciando motor de escucha nativo...")
-
         while self.running and not self.shutdown_event.is_set():
             
-            # --- FASE 1: GESTIÓN DEL PROCESO ---
-            
-            # Si TARS habla, matamos el oído
+            # 1. SI TARS ESTÁ HABLANDO, ESPERAMOS
             if status.is_speaking:
-                if process:
-                    # print("EAR: 🔇 TARS habla -> Apagando arecord")
-                    process.terminate()
-                    process.wait() # Asegurar que murió
-                    process = None
-                    is_recording = False
-                    self.current_recording = []
                 time.sleep(0.1)
                 continue
 
-            # Si TARS calla y no hay oído, lo encendemos
-            if not process and not status.is_speaking:
-                try:
-                    # Lanzamos arecord en segundo plano y leemos su salida
-                    # -D default: Usa el micro seleccionado en pantalla
-                    cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-r", str(self.rate), "-c", "2", "-t", "raw", "-q"]
-                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                    print("EAR: 👂 Oído REINICIADO y listo.")
-                    # Limpiamos buffer antiguo
-                    self.current_recording = []
-                except Exception as e:
-                    print(f"EAR START ERROR: {e}")
-                    time.sleep(1)
-                    continue
+            # 2. INTENTAMOS ABRIR EL OÍDO
+            try:
+                self.audio_buffer = [] 
+                
+                def callback(indata, frames, time_info, status_code):
+                    if status_code: pass
+                    self.audio_buffer.append(indata.copy())
 
-            # --- FASE 2: LECTURA DE AUDIO ---
-            if process:
-                try:
-                    # Leemos 4kb de audio crudo
-                    raw_bytes = process.stdout.read(self.chunk_size * 4) 
+                # --- CAMBIO CRÍTICO: device=None usa el DEFAULT del sistema (el que seleccionaste en pantalla) ---
+                with sd.InputStream(samplerate=self.fs, channels=self.channels, 
+                                  device=None, callback=callback):
                     
-                    if not raw_bytes: 
-                        time.sleep(0.01)
-                        continue
+                    print("EAR: 👂 Oído ABIERTO y esperando...")
+                    
+                    is_recording = False
+                    silence_start = None
+                    
+                    # Bucle de escucha activa
+                    while self.running:
+                        
+                        # --- DETECTOR DE INTERRUPCIÓN ---
+                        # Si TARS necesita hablar, ROMPEMOS el bucle para liberar el micro
+                        if status.is_speaking:
+                            print("EAR: 🔇 TARS va a hablar -> Apagando oído...")
+                            break 
+                        # --------------------------------
 
-                    # Convertimos bytes a números
-                    audio_data = np.frombuffer(raw_bytes, dtype=np.int16)
-                    
-                    # Calcular volumen (RMS)
-                    volume = np.sqrt(np.mean(audio_data**2))
-
-                    # Lógica de detección de voz
-                    if volume > self.threshold:
-                        if not is_recording:
-                            print(f"🎤 VOZ DETECTADA (Nivel: {int(volume)})")
-                            is_recording = True
-                            self.current_recording = [audio_data]
-                        else:
-                            self.current_recording.append(audio_data)
-                        silence_start = None
-                    
-                    elif is_recording:
-                        self.current_recording.append(audio_data)
-                        if silence_start is None:
-                            silence_start = time.time()
-                        elif time.time() - silence_start > self.silence_limit:
-                            print("🛑 PROCESANDO...")
-                            is_recording = False
-                            # Enviamos a transcribir
-                            threading.Thread(target=self._transcribe, args=(self.current_recording, client)).start()
-                            self.current_recording = []
+                        if not self.audio_buffer:
+                            time.sleep(0.05)
+                            continue
+                        
+                        while self.audio_buffer:
+                            chunk = self.audio_buffer.pop(0)
+                            volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                             
-                except Exception as e:
-                    # Si arecord muere, reseteamos variable para que se reinicie en la siguiente vuelta
-                    process = None
+                            # DEBUG: Descomenta esto si quieres ver los números de volumen en tiempo real
+                            # if volume > 0.01: print(f"Vol: {volume:.4f}", end="\r")
 
-        # Limpieza al salir
-        if process: process.terminate()
+                            if volume > self.threshold:
+                                if not is_recording:
+                                    print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
+                                    is_recording = True
+                                    self.current_recording = [chunk]
+                                else:
+                                    self.current_recording.append(chunk)
+                                silence_start = None
+                            
+                            elif is_recording:
+                                self.current_recording.append(chunk)
+                                if silence_start is None:
+                                    silence_start = time.time()
+                                elif time.time() - silence_start > self.silence_limit:
+                                    print("🛑 PROCESANDO...")
+                                    is_recording = False
+                                    # Procesamos en hilo aparte
+                                    threading.Thread(target=self._transcribe, 
+                                                   args=(self.current_recording, client)).start()
+                                    self.current_recording = []
+                        
+                        time.sleep(0.01)
 
-    def _transcribe(self, audio_data_list, client):
-        if not audio_data_list: return
+            except Exception as e:
+                print(f"EAR ERROR: {e}")
+                time.sleep(1) # Esperar si falla el driver
+
+            # --- PAUSA DE SEGURIDAD AL CERRAR ---
+            # Cuando salimos del 'with', esperamos 1.5s antes de volver a intentar abrirlo.
+            # Esto da tiempo a que TARS termine de hablar y el driver respire.
+            if status.is_speaking:
+                while status.is_speaking:
+                    time.sleep(0.1)
+                print("EAR: ⏳ Esperando liberación de hardware (1s)...")
+                time.sleep(1.0) 
+
+    def _transcribe(self, audio_data, client):
+        if not audio_data: return
         try:
-            # Concatenar y convertir para Whisper
-            full_audio = np.concatenate(audio_data_list)
-            # Normalizar de int16 a float para guardar wav
-            full_audio_float = full_audio.astype(np.float32) / 32768.0
-            
+            recording = np.concatenate(audio_data, axis=0)
             buffer = io.BytesIO()
             buffer.name = 'audio.wav'
-            sf.write(buffer, full_audio_float, self.rate)
+            sf.write(buffer, recording, self.fs)
             buffer.seek(0)
             
             transcript = client.audio.transcriptions.create(
