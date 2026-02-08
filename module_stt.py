@@ -25,98 +25,100 @@ class STTManager:
         
         self.fs = 44100 
         self.channels = 2 
-        
-        # Umbral para tu voz (ajústalo si es necesario)
-        self.threshold = 0.2 
-        
+        self.threshold = 0.2 # Mantenemos el umbral que te funcionó bien
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Sistema Anti-Eco (Sincronizado)")
+        queue_message("EAR: Sistema Walkie-Talkie (Reiniciar al hablar)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
-        audio_buffer = []
-        is_recording = False
-        silence_start = None
-        device_id = None 
-
+        # Configuración de OpenAI
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
         client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
 
-        def callback(indata, frames, time, status):
-            if status: pass
-            audio_buffer.append(indata.copy())
+        # Bucle Principal: Gestiona el ciclo de vida del micrófono
+        while self.running and not self.shutdown_event.is_set():
+            
+            # 1. SI TARS ESTÁ HABLANDO, ESPERAMOS
+            if status.is_speaking:
+                time.sleep(0.1)
+                continue
 
-        try:
-            with sd.InputStream(samplerate=self.fs, channels=self.channels, 
-                              device=device_id, callback=callback):
+            # 2. SI TARS ESTÁ CALLADO, ABRIMOS EL MICRO
+            try:
+                # Buffer local para este ciclo de escucha
+                self.audio_buffer = [] 
                 
-                print(f"EAR: 👂 Escuchando...")
-                
-                while self.running and not self.shutdown_event.is_set():
-                    
-                    # --- LÓGICA CRÍTICA ---
-                    # Si TARS está hablando, VACIAMOS el buffer y no hacemos nada más.
-                    # Es como si se tapara los oídos físicamente.
-                    if status.is_speaking:
-                        if len(audio_buffer) > 0:
-                            audio_buffer.clear() # ¡Borrar lo que entra!
-                            is_recording = False # Cancelar cualquier grabación a medias
-                        time.sleep(0.05) # Chequeo rápido
-                        continue
-                    # ----------------------
+                def callback(indata, frames, time_info, status_code):
+                    if status_code: pass
+                    self.audio_buffer.append(indata.copy())
 
-                    if not audio_buffer:
-                        time.sleep(0.05)
-                        continue
+                # ABRIMOS EL STREAM (Esto reinicia el driver)
+                with sd.InputStream(samplerate=self.fs, channels=self.channels, 
+                                  callback=callback):
                     
-                    while audio_buffer:
-                        chunk = audio_buffer.pop(0)
-                        
-                        # Si justo empezó a hablar mientras procesábamos este trozo -> PARAR
+                    print("EAR: 👂 Oído ABIERTO y listo.")
+                    
+                    # Bucle Interno: Escuchar mientras nadie hable
+                    is_recording = False
+                    silence_start = None
+                    
+                    while self.running and not status.is_speaking:
+                        # Si de repente TARS empieza a hablar, ROMPEMOS este bucle
+                        # para que se cierre el 'with stream' y libere la tarjeta
                         if status.is_speaking:
-                            audio_buffer.clear()
+                            print("EAR: 🔇 TARS va a hablar -> Apagando oído...")
                             break
 
-                        volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
+                        if not self.audio_buffer:
+                            time.sleep(0.05)
+                            continue
                         
-                        if volume > self.threshold:
-                            if not is_recording:
-                                print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
-                                is_recording = True
-                                self.current_recording = [chunk]
-                            else:
+                        while self.audio_buffer:
+                            chunk = self.audio_buffer.pop(0)
+                            volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
+                            
+                            if volume > self.threshold:
+                                if not is_recording:
+                                    print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
+                                    is_recording = True
+                                    self.current_recording = [chunk]
+                                else:
+                                    self.current_recording.append(chunk)
+                                silence_start = None
+                            
+                            elif is_recording:
                                 self.current_recording.append(chunk)
-                            silence_start = None
+                                if silence_start is None:
+                                    silence_start = time.time()
+                                elif time.time() - silence_start > self.silence_limit:
+                                    print("🛑 PROCESANDO...")
+                                    is_recording = False
+                                    # Procesamos en un hilo aparte para no bloquear el cierre del micro si hiciera falta
+                                    threading.Thread(target=self._transcribe, 
+                                                   args=(self.current_recording, client)).start()
+                                    self.current_recording = []
                         
-                        elif is_recording:
-                            self.current_recording.append(chunk)
-                            if silence_start is None:
-                                silence_start = time.time()
-                            elif time.time() - silence_start > self.silence_limit:
-                                print("🛑 PROCESANDO...")
-                                is_recording = False
-                                self._transcribe(self.current_recording, client)
-                                self.current_recording = []
-                        
-                    time.sleep(0.01)
-                    
-        except Exception as e:
-            print(f"EAR ERROR: {e}")
+                        time.sleep(0.01)
+
+            except Exception as e:
+                print(f"EAR RESTART ERROR: {e}")
+                time.sleep(1) # Esperar un poco antes de reintentar si falló el hardware
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
-        recording = np.concatenate(audio_data, axis=0)
-        buffer = io.BytesIO()
-        buffer.name = 'audio.wav'
-        sf.write(buffer, recording, self.fs)
-        buffer.seek(0)
         try:
+            recording = np.concatenate(audio_data, axis=0)
+            buffer = io.BytesIO()
+            buffer.name = 'audio.wav'
+            sf.write(buffer, recording, self.fs)
+            buffer.seek(0)
+            
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
@@ -124,9 +126,7 @@ class STTManager:
             )
             text = transcript.text
             
-            # Filtro básico de ruido
-            if not text or len(text.strip()) < 2:
-                return
+            if not text or len(text.strip()) < 2: return
 
             print(f"🗣️ TARS: '{text}'")
             if self.utterance_callback:
