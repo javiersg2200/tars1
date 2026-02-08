@@ -26,8 +26,7 @@ class STTManager:
         self.fs = 44100 
         self.channels = 2 
         
-        # --- CAMBIO 1: UMBRAL MÁS ALTO ---
-        # Tu voz es 0.39, el eco es 0.14. Ponemos el corte en 0.2
+        # Umbral para tu voz (ajústalo si es necesario)
         self.threshold = 0.2 
         
         self.silence_limit = 1.2
@@ -36,7 +35,7 @@ class STTManager:
 
     def start(self):
         self.running = True
-        queue_message("EAR: Sistema Anti-Eco (Umbral 0.2 + Delay)")
+        queue_message("EAR: Sistema Anti-Eco (Sincronizado)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -44,10 +43,7 @@ class STTManager:
         is_recording = False
         silence_start = None
         device_id = None 
-        
-        # Variable para controlar el tiempo de espera después de hablar
-        last_speech_time = 0
-        
+
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
         client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
@@ -60,39 +56,38 @@ class STTManager:
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: 👂 Escuchando (Umbral de corte: {self.threshold})")
+                print(f"EAR: 👂 Escuchando...")
                 
                 while self.running and not self.shutdown_event.is_set():
                     
-                    # --- LÓGICA ANTI-ECO MEJORADA ---
+                    # --- LÓGICA CRÍTICA ---
+                    # Si TARS está hablando, VACIAMOS el buffer y no hacemos nada más.
+                    # Es como si se tapara los oídos físicamente.
                     if status.is_speaking:
-                        # Si está hablando, limpiamos todo y actualizamos el reloj
-                        audio_buffer = [] 
-                        is_recording = False 
-                        last_speech_time = time.time()
-                        time.sleep(0.1)
+                        if len(audio_buffer) > 0:
+                            audio_buffer.clear() # ¡Borrar lo que entra!
+                            is_recording = False # Cancelar cualquier grabación a medias
+                        time.sleep(0.05) # Chequeo rápido
                         continue
-                    
-                    # --- CAMBIO 2: TIEMPO DE ENFRIAMIENTO (COOLDOWN) ---
-                    # Si hace menos de 2 segundos que terminó de hablar, seguimos sordos
-                    # Esto evita que escuche el "final" de su propia frase
-                    if time.time() - last_speech_time < 2.0:
-                        audio_buffer = []
-                        time.sleep(0.1)
-                        continue
-                    # ----------------------------------
+                    # ----------------------
 
                     if not audio_buffer:
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                         continue
                     
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
+                        
+                        # Si justo empezó a hablar mientras procesábamos este trozo -> PARAR
+                        if status.is_speaking:
+                            audio_buffer.clear()
+                            break
+
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                         
                         if volume > self.threshold:
                             if not is_recording:
-                                print(f"🎤 ESCUCHANDO... (Vol: {volume:.4f})")
+                                print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
                                 is_recording = True
                                 self.current_recording = [chunk]
                             else:
@@ -129,7 +124,7 @@ class STTManager:
             )
             text = transcript.text
             
-            # Filtro extra: Si lo que ha entendido es muy corto, lo ignoramos
+            # Filtro básico de ruido
             if not text or len(text.strip()) < 2:
                 return
 
