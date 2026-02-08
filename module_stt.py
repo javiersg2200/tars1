@@ -8,7 +8,7 @@ import io
 import os
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
-import modules.tars_status as status # <--- IMPORTAMOS EL SEMÁFORO
+import modules.tars_status as status 
 
 try:
     from openai import OpenAI
@@ -25,14 +25,18 @@ class STTManager:
         
         self.fs = 44100 
         self.channels = 2 
-        self.threshold = 0.03
+        
+        # --- CAMBIO 1: UMBRAL MÁS ALTO ---
+        # Tu voz es 0.39, el eco es 0.14. Ponemos el corte en 0.2
+        self.threshold = 0.2 
+        
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Sistema anti-eco activado.")
+        queue_message("EAR: Sistema Anti-Eco (Umbral 0.2 + Delay)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -40,6 +44,9 @@ class STTManager:
         is_recording = False
         silence_start = None
         device_id = None 
+        
+        # Variable para controlar el tiempo de espera después de hablar
+        last_speech_time = 0
         
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
@@ -53,20 +60,27 @@ class STTManager:
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: 👂 Escuchando (Ignorando voz propia)")
+                print(f"EAR: 👂 Escuchando (Umbral de corte: {self.threshold})")
                 
                 while self.running and not self.shutdown_event.is_set():
                     
-                    # --- FILTRO ANTI-ECO ---
-                    # Si TARS está hablando, vaciamos el buffer y no hacemos nada
+                    # --- LÓGICA ANTI-ECO MEJORADA ---
                     if status.is_speaking:
-                        if audio_buffer:
-                            audio_buffer = [] # Limpiar basura
-                            is_recording = False # Resetear grabación
-                            # print("🔇 (TARS hablando, oído desactivado)", end="\r")
+                        # Si está hablando, limpiamos todo y actualizamos el reloj
+                        audio_buffer = [] 
+                        is_recording = False 
+                        last_speech_time = time.time()
                         time.sleep(0.1)
                         continue
-                    # -----------------------
+                    
+                    # --- CAMBIO 2: TIEMPO DE ENFRIAMIENTO (COOLDOWN) ---
+                    # Si hace menos de 2 segundos que terminó de hablar, seguimos sordos
+                    # Esto evita que escuche el "final" de su propia frase
+                    if time.time() - last_speech_time < 2.0:
+                        audio_buffer = []
+                        time.sleep(0.1)
+                        continue
+                    # ----------------------------------
 
                     if not audio_buffer:
                         time.sleep(0.1)
@@ -115,7 +129,7 @@ class STTManager:
             )
             text = transcript.text
             
-            # Filtro extra: Si lo que ha entendido está vacío o es muy corto
+            # Filtro extra: Si lo que ha entendido es muy corto, lo ignoramos
             if not text or len(text.strip()) < 2:
                 return
 
