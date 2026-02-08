@@ -22,11 +22,11 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # Configuración inicial (se ajustará automáticamente)
-        self.fs = 44100
-        self.channels = 2
+        # Valores por defecto (se ajustarán solos)
+        self.fs = 48000      
+        self.channels = 2    
         
-        self.threshold = 0.04 # Ajustar sensibilidad
+        self.threshold = 0.04 
         self.silence_limit = 1.5
         self.amp_gain = amp_gain
         self.current_recording = []
@@ -35,36 +35,52 @@ class STTManager:
         self.running = True
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
-    def _find_wm8960(self):
-        """Busca el HAT por nombre y devuelve su ID real y canales"""
-        print("\n--- BUSCANDO HAT WM8960 ---")
+    def _find_wm8960_and_rate(self):
+        """Busca el HAT y negocia la frecuencia compatible"""
+        print("\n--- BUSCANDO HAT WM8960 & FRECUENCIA ---")
+        found_id = None
+        found_name = ""
+        
+        # 1. Buscar Dispositivo
         try:
             devices = sd.query_devices()
             for i, dev in enumerate(devices):
-                # Imprimimos lo que encuentra para depurar
-                # print(f"ID {i}: {dev['name']} (In: {dev['max_input_channels']})")
-                
-                # Buscamos la palabra clave en el nombre
                 if ('wm8960' in dev['name'].lower() or 'seeed' in dev['name'].lower()) and dev['max_input_channels'] > 0:
-                    print(f"✅ ¡ENCONTRADO! ID Python: {i} | Nombre: {dev['name']}")
-                    return i, dev['max_input_channels']
-        except Exception as e:
-            print(f"Error buscando dispositivos: {e}")
+                    found_id = i
+                    found_name = dev['name']
+                    print(f"✅ Hardware encontrado: ID {i} | {found_name}")
+                    break
+        except:
+            pass
+
+        if found_id is None:
+            print("⚠️ No se encontró nombre 'wm8960', probando default.")
+            found_id = sd.default.device[0]
+
+        # 2. Negociar Frecuencia (48k -> 44.1k -> 16k)
+        supported_rates = [48000, 44100, 16000]
+        for rate in supported_rates:
+            try:
+                # Intentamos comprobar si soporta esta configuración
+                sd.check_input_settings(device=found_id, channels=2, samplerate=rate)
+                print(f"✅ Frecuencia aceptada: {rate}Hz")
+                return found_id, rate
+            except Exception as e:
+                print(f"❌ {rate}Hz rechazado ({e})")
         
-        print("❌ No se encontró por nombre. Intentando fallback a default.")
-        return None, 2
+        print("⚠️ Ninguna frecuencia estándar funcionó. Forzando 44100Hz.")
+        return found_id, 44100
 
     def _listen_loop(self):
         audio_buffer = []
         is_recording = False
         silence_start = None
         
-        # 1. BUSCAR EL DISPOSITIVO AUTOMÁTICAMENTE
-        device_id, dev_channels = self._find_wm8960()
+        # AUTO-CONFIGURACIÓN
+        device_id, valid_fs = self._find_wm8960_and_rate()
+        self.fs = valid_fs # Guardamos la frecuencia que funciona
         
-        # Actualizamos canales según lo que diga el hardware
-        self.channels = dev_channels
-        
+        # Configurar API
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
 
@@ -76,16 +92,16 @@ class STTManager:
             return
 
         def callback(indata, frames, time, status):
-            if status: print(f"EAR STATUS: {status}")
+            if status: print(f"EAR: {status}")
             audio_buffer.append(indata.copy())
 
         try:
-            # Usamos el ID encontrado dinámicamente
+            # Abrimos con la configuración validada
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: Escuchando en ID {device_id} ({self.channels} canales, {self.fs}Hz)")
-                queue_message("EAR: Oído activo y conectado.")
+                print(f"EAR: 👂 Oído activo en ID {device_id} a {self.fs}Hz")
+                queue_message("EAR: Escuchando...")
                 
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
@@ -94,13 +110,11 @@ class STTManager:
                     
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
-                        
-                        # Calcular volumen (promedio)
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                         
                         if volume > self.threshold:
                             if not is_recording:
-                                print(f"🎤 ESCUCHANDO... (Vol: {volume:.4f})")
+                                print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
                                 is_recording = True
                                 self.current_recording = [chunk]
                             else:
@@ -112,7 +126,7 @@ class STTManager:
                             if silence_start is None:
                                 silence_start = time.time()
                             elif time.time() - silence_start > self.silence_limit:
-                                print("🛑 PROCESANDO...")
+                                print("🛑 Procesando...")
                                 is_recording = False
                                 self._transcribe(self.current_recording, client)
                                 self.current_recording = []
@@ -121,7 +135,6 @@ class STTManager:
                     
         except Exception as e:
             print(f"EAR ERROR CRÍTICO: {e}")
-            print("Posible solución: Ejecuta 'python list_audio.py' para ver los IDs reales.")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
@@ -137,7 +150,7 @@ class STTManager:
                 language="es"
             )
             text = transcript.text
-            print(f"🗣️ TARS: '{text}'")
+            print(f"🗣️ TARS OYÓ: '{text}'")
             if self.utterance_callback:
                 self.utterance_callback(text)
         except Exception as e:
