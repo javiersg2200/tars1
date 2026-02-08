@@ -23,14 +23,14 @@ class STTManager:
         self.utterance_callback = None
         self.fs = 16000
         self.channels = 1
-        self.threshold = 0.05  # Umbral subido para evitar ruidos
+        self.threshold = 0.08  # Umbral alto para evitar ruido
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Inicializando HAT WM8960...")
+        queue_message("EAR: Conectando al HAT (Card 3)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -38,8 +38,8 @@ class STTManager:
         is_recording = False
         silence_start = None
         
-        # Forzamos el ID 1 que es tu HAT WM8960
-        device_id = 1
+        # --- AQUÍ ESTABA EL ERROR: CAMBIAMOS 1 POR 3 ---
+        device_id = 3 
         
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
@@ -57,7 +57,7 @@ class STTManager:
         try:
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
-                print(f"EAR: Micrófono del HAT WM8960 abierto (ID: {device_id})")
+                print(f"EAR: Micrófono abierto en Card {device_id} (WM8960)")
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
                         time.sleep(0.1)
@@ -65,6 +65,7 @@ class STTManager:
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
+                        
                         if volume > self.threshold:
                             if not is_recording:
                                 print(f"🎤 ESCUCHANDO... (Vol: {volume:.4f})")
@@ -97,8 +98,7 @@ class STTManager:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
-                language="es",
-                initial_prompt="TARS, inteligencia artificial, sarcasmo, humor, cooperativo."
+                language="es"
             )
             text = transcript.text
             print(f"🗣️ TARS ENTENDIÓ: '{text}'")
