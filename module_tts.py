@@ -2,6 +2,7 @@
 import os
 import io
 import asyncio
+import sounddevice as sd
 import soundfile as sf
 from openai import OpenAI
 from modules.module_config import load_config
@@ -21,27 +22,16 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
     if not client: return
 
     try:
-        print(f"🔊 Generando voz para: {text[:30]}...")
         response = client.audio.speech.create(
             model="tts-1",
             voice="onyx", 
             input=text
         )
-        
-        # 1. Guardar MP3
-        with open("temp.mp3", "wb") as f:
-            f.write(response.content)
-
-        # 2. Convertir a WAV 44100Hz (estándar del HAT)
-        # Usamos -loglevel panic para que ffmpeg no ensucie la pantalla
-        os.system("ffmpeg -y -i temp.mp3 -ar 44100 -ac 2 -loglevel panic temp.wav")
-
-        # 3. Reproducir forzando la tarjeta 3 (hw:3,0)
-        print("🔈 Reproduciendo en HAT (Card 3)...")
-        os.system("aplay -D hw:3,0 temp.wav > /dev/null 2>&1")
-        
+        data, fs = sf.read(io.BytesIO(response.content))
+        # Forzamos salida por el dispositivo 1 (HAT WM8960)
+        sd.play(data, fs, device=1)
+        sd.wait()
     except Exception as e:
         print(f"TTS ERROR: {e}")
 
-def update_tts_settings(url):
-    pass
+def update_tts_settings(url): pass
