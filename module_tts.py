@@ -3,6 +3,7 @@ import os
 import subprocess
 from openai import OpenAI
 from modules.module_config import load_config
+import modules.tars_status as status # <--- IMPORTAMOS EL SEMÁFORO
 
 CONFIG = load_config()
 
@@ -19,6 +20,9 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
     if not client: return
 
     try:
+        # 1. SEMÁFORO EN ROJO (TARS va a hablar)
+        status.is_speaking = True 
+        
         print(f"🔊 Generando voz para: '{text[:20]}...'")
         
         response = client.audio.speech.create(
@@ -33,14 +37,13 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
         with open(mp3_file, "wb") as f:
             f.write(response.content)
 
-        # Convertir a WAV estándar
         subprocess.run(
             f"ffmpeg -y -i {mp3_file} -ar 44100 -ac 2 -f wav {wav_file} -loglevel quiet", 
             shell=True
         )
 
-        # --- CAMBIO CLAVE: Usar dispositivo 'default' ---
-        print(f"🔊 Reproduciendo en DEFAULT...")
+        print(f"🔊 Reproduciendo...")
+        # Reproducimos
         subprocess.run(
             f"aplay -D default {wav_file} -q", 
             shell=True
@@ -48,5 +51,9 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
 
     except Exception as e:
         print(f"TTS ERROR: {e}")
+        
+    finally:
+        # 2. SEMÁFORO EN VERDE (Ya terminó, puedes escuchar)
+        status.is_speaking = False
 
 def update_tts_settings(url): pass
