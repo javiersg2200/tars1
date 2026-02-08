@@ -2,10 +2,10 @@
 import threading
 import time
 import numpy as np
-import subprocess
+import sounddevice as sd
+import soundfile as sf
 import io
 import os
-import soundfile as sf
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 
@@ -22,115 +22,100 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # CONFIGURACIÓN
-        self.rate = 44100
-        self.chunk_size = 4096 # Buffer un poco más grande
-        
-        # --- UMBRAL MUY BAJO PARA PRUEBAS ---
-        self.threshold = 150  
-        self.silence_limit = 2.0
+        # RESTAURADO: Configuración que funcionaba ayer, ajustada a tu hardware de hoy
+        self.fs = 44100      # Frecuencia que confirmamos con arecord
+        self.channels = 2    # El HAT es estéreo
+        self.threshold = 0.03 # Sensibilidad estándar
+        self.silence_limit = 1.2
+        self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Arrancando en MODO DEBUG...")
+        queue_message("EAR: Restaurando sistema de escucha (ID 3)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
-    def _get_card_number(self):
-        try:
-            result = subprocess.check_output("arecord -l", shell=True).decode()
-            for line in result.split('\n'):
-                if "wm8960" in line:
-                    parts = line.split(":")
-                    card_num = parts[0].replace("card ", "").strip()
-                    return card_num
-        except:
-            pass
-        return "3"
-
     def _listen_loop(self):
-        card_num = self._get_card_number()
-        print(f"EAR: Usando tarjeta {card_num}")
-        
-        # Usamos arecord forzando parámetros
-        cmd = [
-            "arecord", 
-            "-D", f"hw:{card_num},0", 
-            "-f", "S16_LE", 
-            "-r", str(self.rate), 
-            "-c", "2", 
-            "-t", "raw"
-        ]
-        
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        
+        audio_buffer = []
         is_recording = False
         silence_start = None
         
-        # API Key
+        # EL ÚNICO CAMBIO: Usamos el ID 3 que descubrimos hoy
+        device_id = 3 
+        
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
-        client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
 
-        print("EAR: 👂 Escuchando... (Mira los números de volumen)")
+        client = None
+        if OpenAI and api_key:
+            client = OpenAI(api_key=api_key)
+        else:
+            print("EAR ERROR: No API Key")
+            return
+
+        def callback(indata, frames, time, status):
+            if status:
+                pass # Ignoramos errores menores para que no se detenga
+            audio_buffer.append(indata.copy())
 
         try:
-            while self.running and not self.shutdown_event.is_set():
-                # Leemos un trozo de audio
-                raw_bytes = process.stdout.read(self.chunk_size * 4) 
+            # Volvemos a usar sd.InputStream que es lo que funcionaba fluído
+            with sd.InputStream(samplerate=self.fs, channels=self.channels, 
+                              device=device_id, callback=callback):
                 
-                if not raw_bytes or len(raw_bytes) == 0:
-                    continue
+                print(f"EAR: ✅ Oído abierto correctamente en ID {device_id}")
                 
-                # Convertir a números
-                audio_data = np.frombuffer(raw_bytes, dtype=np.int16)
-                
-                # Calcular volumen real
-                volume = int(np.sqrt(np.mean(audio_data**2)))
-                
-                # --- DEBUG: IMPRIMIR VOLUMEN ---
-                # Si el volumen es mayor que 10 (para no ensuciar con silencio absoluto) lo imprimimos
-                if volume > 10:
-                    print(f"🔊 VOL: {volume}", end="\r") 
-                
-                if volume > self.threshold:
-                    if not is_recording:
-                        print(f"\n🎤 [DETECTADO] Iniciando grabación (Nivel: {volume})")
-                        is_recording = True
-                        self.current_recording = [audio_data]
-                    else:
-                        self.current_recording.append(audio_data)
-                    silence_start = None
-                
-                elif is_recording:
-                    self.current_recording.append(audio_data)
-                    if silence_start is None:
-                        silence_start = time.time()
-                    elif time.time() - silence_start > self.silence_limit:
-                        print("\n🛑 Fin de frase. Enviando a OpenAI...")
-                        is_recording = False
-                        self._transcribe(self.current_recording, client)
-                        self.current_recording = []
-                
+                while self.running and not self.shutdown_event.is_set():
+                    if not audio_buffer:
+                        time.sleep(0.1)
+                        continue
+                    
+                    while audio_buffer:
+                        chunk = audio_buffer.pop(0)
+                        
+                        # Calcular volumen
+                        volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
+                        
+                        if volume > self.threshold:
+                            if not is_recording:
+                                print(f"🎤 ESCUCHANDO... (Vol: {volume:.4f})")
+                                is_recording = True
+                                self.current_recording = [chunk]
+                            else:
+                                self.current_recording.append(chunk)
+                            silence_start = None
+                        
+                        elif is_recording:
+                            self.current_recording.append(chunk)
+                            if silence_start is None:
+                                silence_start = time.time()
+                            elif time.time() - silence_start > self.silence_limit:
+                                print("🛑 PROCESANDO VOZ...")
+                                is_recording = False
+                                self._transcribe(self.current_recording, client)
+                                self.current_recording = []
+                        
+                    time.sleep(0.01)
+                    
         except Exception as e:
             print(f"EAR ERROR: {e}")
-        finally:
-            process.terminate()
+            print("Intenta cambiar el ID o la frecuencia si esto falla.")
 
-    def _transcribe(self, audio_data_list, client):
-        if not audio_data_list: return
-        full_audio = np.concatenate(audio_data_list)
+    def _transcribe(self, audio_data, client):
+        if not audio_data: return
+        recording = np.concatenate(audio_data, axis=0)
         buffer = io.BytesIO()
         buffer.name = 'audio.wav'
-        sf.write(buffer, full_audio, self.rate)
+        sf.write(buffer, recording, self.fs)
         buffer.seek(0)
-        
         try:
             transcript = client.audio.transcriptions.create(
-                model="whisper-1", file=buffer, language="es"
+                model="whisper-1", 
+                file=buffer, 
+                language="es"
             )
             text = transcript.text
-            print(f"🗣️ TARS OYÓ: '{text}'")
+            print(f"🗣️ TARS ENTENDIÓ: '{text}'")
             if self.utterance_callback:
                 self.utterance_callback(text)
         except Exception as e:
