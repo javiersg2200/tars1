@@ -22,17 +22,17 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # RESTAURADO: Configuración que funcionaba ayer, ajustada a tu hardware de hoy
-        self.fs = 44100      # Frecuencia que confirmamos con arecord
-        self.channels = 2    # El HAT es estéreo
-        self.threshold = 0.03 # Sensibilidad estándar
+        # --- CONFIGURACIÓN DE AYER (Ajustada a tu hardware de hoy) ---
+        self.fs = 44100       # Frecuencia estándar
+        self.channels = 2     # Tu HAT es estéreo (ayer funcionaba por suerte, hoy hay que ser explícito)
+        self.threshold = 0.03 # Umbral de sensibilidad
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Restaurando sistema de escucha (ID 3)...")
+        queue_message("EAR: Iniciando sistema (Versión Ayer)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -40,7 +40,7 @@ class STTManager:
         is_recording = False
         silence_start = None
         
-        # EL ÚNICO CAMBIO: Usamos el ID 3 que descubrimos hoy
+        # AYER ERA 1, HOY TU LINUX DICE QUE ES 3
         device_id = 3 
         
         tts_conf = self.config['TTS']
@@ -55,15 +55,15 @@ class STTManager:
 
         def callback(indata, frames, time, status):
             if status:
-                pass # Ignoramos errores menores para que no se detenga
+                pass 
             audio_buffer.append(indata.copy())
 
         try:
-            # Volvemos a usar sd.InputStream que es lo que funcionaba fluído
+            # Abrimos el micrófono como ayer, usando sounddevice
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: ✅ Oído abierto correctamente en ID {device_id}")
+                print(f"EAR: Micrófono abierto en ID {device_id}")
                 
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
@@ -73,7 +73,7 @@ class STTManager:
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
                         
-                        # Calcular volumen
+                        # Cálculo de volumen
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                         
                         if volume > self.threshold:
@@ -99,7 +99,6 @@ class STTManager:
                     
         except Exception as e:
             print(f"EAR ERROR: {e}")
-            print("Intenta cambiar el ID o la frecuencia si esto falla.")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
