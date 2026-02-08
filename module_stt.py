@@ -21,16 +21,18 @@ class STTManager:
         self.ui_manager = ui_manager
         self.running = False
         self.utterance_callback = None
+        
+        # CONFIGURACIÓN ORIGINAL DE AYER
         self.fs = 16000
         self.channels = 1
-        self.threshold = 0.05  # Umbral subido para evitar ruidos
+        self.threshold = 0.05
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Inicializando HAT WM8960...")
+        queue_message("EAR: Inicializando HAT (Configuración Ayer)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -38,7 +40,7 @@ class STTManager:
         is_recording = False
         silence_start = None
         
-        # Forzamos el ID 1 que es tu HAT WM8960
+        # EL ID QUE FUNCIONABA AYER
         device_id = 1
         
         tts_conf = self.config['TTS']
@@ -52,12 +54,14 @@ class STTManager:
             return
 
         def callback(indata, frames, time, status):
+            if status:
+                pass
             audio_buffer.append(indata.copy())
 
         try:
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
-                print(f"EAR: Micrófono del HAT WM8960 abierto (ID: {device_id})")
+                print(f"EAR: Micrófono abierto (ID: {device_id})")
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
                         time.sleep(0.1)
@@ -97,8 +101,7 @@ class STTManager:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
-                language="es",
-                initial_prompt="TARS, inteligencia artificial, sarcasmo, humor, cooperativo."
+                language="es"
             )
             text = transcript.text
             print(f"🗣️ TARS ENTENDIÓ: '{text}'")
