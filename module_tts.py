@@ -20,28 +20,27 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
     if not client: return
 
     try:
-        # 1. SEMÁFORO ROJO (¡Cállate oído!)
+        # 1. AVISO DE HABLA
         status.is_speaking = True 
         
-        print(f"🔊 Generando voz...")
+        print(f"🔊 Generando voz rápida (WAV)...")
         
-        # 2. SOLICITAMOS WAV DIRECTAMENTE (Más rápido)
+        # Pide WAV directo a OpenAI (Ahorra 1-2 segundos)
         response = client.audio.speech.create(
             model="tts-1",
             voice="onyx",
             input=text,
-            response_format="wav" # <--- ¡TRUCO DE VELOCIDAD!
+            response_format="wav" 
         )
         
         wav_file = "speech_temp.wav"
         
-        # Guardamos directo (sin conversión ffmpeg)
         with open(wav_file, "wb") as f:
             f.write(response.content)
 
         print(f"🔊 TARS HABLANDO...")
         
-        # 3. REPRODUCIMOS
+        # Reproducir
         subprocess.run(
             f"aplay -D default {wav_file} -q", 
             shell=True
@@ -51,8 +50,8 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
         print(f"TTS ERROR: {e}")
         
     finally:
-        # 4. SEMÁFORO VERDE (Oído, despierta)
-        print("✅ Fin de frase. Reactivando oído...")
+        # 2. LIBERAR
+        print("✅ Fin de frase.")
         status.is_speaking = False
 
 def update_tts_settings(url): pass
