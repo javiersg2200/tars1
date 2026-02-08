@@ -22,29 +22,49 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # --- CONFIGURACIÓN PARA HAT WM8960 ---
-        self.fs = 44100      # Frecuencia nativa del HAT
-        self.channels = 2    # El HAT es Estéreo (2 micros)
+        # Configuración inicial (se ajustará automáticamente)
+        self.fs = 44100
+        self.channels = 2
         
-        self.threshold = 0.03 # Sensibilidad (ajustar si necesario)
+        self.threshold = 0.04 # Ajustar sensibilidad
         self.silence_limit = 1.5
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Inicializando Estéreo (Card 3)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
+
+    def _find_wm8960(self):
+        """Busca el HAT por nombre y devuelve su ID real y canales"""
+        print("\n--- BUSCANDO HAT WM8960 ---")
+        try:
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                # Imprimimos lo que encuentra para depurar
+                # print(f"ID {i}: {dev['name']} (In: {dev['max_input_channels']})")
+                
+                # Buscamos la palabra clave en el nombre
+                if ('wm8960' in dev['name'].lower() or 'seeed' in dev['name'].lower()) and dev['max_input_channels'] > 0:
+                    print(f"✅ ¡ENCONTRADO! ID Python: {i} | Nombre: {dev['name']}")
+                    return i, dev['max_input_channels']
+        except Exception as e:
+            print(f"Error buscando dispositivos: {e}")
+        
+        print("❌ No se encontró por nombre. Intentando fallback a default.")
+        return None, 2
 
     def _listen_loop(self):
         audio_buffer = []
         is_recording = False
         silence_start = None
         
-        # ID DE TU TARJETA (Confirmado que es el 3)
-        device_id = 3 
+        # 1. BUSCAR EL DISPOSITIVO AUTOMÁTICAMENTE
+        device_id, dev_channels = self._find_wm8960()
         
-        # Configurar cliente OpenAI
+        # Actualizamos canales según lo que diga el hardware
+        self.channels = dev_channels
+        
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
 
@@ -56,26 +76,26 @@ class STTManager:
             return
 
         def callback(indata, frames, time, status):
-            # Copiamos los datos del buffer de audio
+            if status: print(f"EAR STATUS: {status}")
             audio_buffer.append(indata.copy())
 
         try:
-            # ABRIMOS EL MICRO EN ESTÉREO
+            # Usamos el ID encontrado dinámicamente
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: Micrófono abierto en Card {device_id} (Estéreo/44100Hz)")
+                print(f"EAR: Escuchando en ID {device_id} ({self.channels} canales, {self.fs}Hz)")
+                queue_message("EAR: Oído activo y conectado.")
                 
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
                         time.sleep(0.1)
                         continue
                     
-                    # Procesamos los fragmentos de audio
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
                         
-                        # Calculamos volumen (promedio de los 2 canales)
+                        # Calcular volumen (promedio)
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                         
                         if volume > self.threshold:
@@ -92,7 +112,7 @@ class STTManager:
                             if silence_start is None:
                                 silence_start = time.time()
                             elif time.time() - silence_start > self.silence_limit:
-                                print("🛑 PROCESANDO VOZ...")
+                                print("🛑 PROCESANDO...")
                                 is_recording = False
                                 self._transcribe(self.current_recording, client)
                                 self.current_recording = []
@@ -101,32 +121,25 @@ class STTManager:
                     
         except Exception as e:
             print(f"EAR ERROR CRÍTICO: {e}")
+            print("Posible solución: Ejecuta 'python list_audio.py' para ver los IDs reales.")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
-        
-        # Unir todos los fragmentos
         recording = np.concatenate(audio_data, axis=0)
-        
-        # Guardar en memoria como WAV
         buffer = io.BytesIO()
         buffer.name = 'audio.wav'
         sf.write(buffer, recording, self.fs)
         buffer.seek(0)
-        
         try:
-            # Enviar a Whisper
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
                 language="es"
             )
             text = transcript.text
-            print(f"🗣️ TARS ENTENDIÓ: '{text}'")
-            
+            print(f"🗣️ TARS: '{text}'")
             if self.utterance_callback:
                 self.utterance_callback(text)
-                    
         except Exception as e:
             print(f"Error Whisper: {e}")
 
