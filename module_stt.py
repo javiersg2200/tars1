@@ -22,9 +22,9 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # Valores iniciales (se ajustarán solos)
-        self.fs = 48000      # Probamos primero con 48k
-        self.channels = 2    # Sabemos que es estéreo
+        # Usamos configuración estándar que funciona con "Default"
+        self.fs = 44100 
+        self.channels = 2 # El sistema mezclará si es necesario
         self.threshold = 0.03
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
@@ -32,67 +32,16 @@ class STTManager:
 
     def start(self):
         self.running = True
-        queue_message("EAR: Negociando frecuencia con el HAT...")
+        queue_message("EAR: Usando micrófono por defecto del sistema...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
-
-    def _find_best_config(self):
-        """Busca el HAT y negocia la frecuencia compatible"""
-        print("\n--- 🔍 BUSCANDO HAT WM8960 Y FRECUENCIA ---")
-        
-        target_id = None
-        target_name = ""
-        
-        # 1. Encontrar el dispositivo
-        try:
-            devices = sd.query_devices()
-            for i, dev in enumerate(devices):
-                if ('wm8960' in dev['name'].lower() or 'seeed' in dev['name'].lower()) and dev['max_input_channels'] > 0:
-                    target_id = i
-                    target_name = dev['name']
-                    break
-            
-            if target_id is None:
-                print("⚠️ No encontré 'wm8960', buscando genérico estéreo...")
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] == 2:
-                        target_id = i
-                        target_name = dev['name']
-                        break
-        except:
-            pass
-
-        if target_id is None:
-            print("❌ No se encontró dispositivo. Usando default (ID 1).")
-            return 1, 48000
-
-        print(f"✅ Dispositivo encontrado: ID {target_id} ({target_name})")
-
-        # 2. Negociar Frecuencia (El paso clave que fallaba)
-        # Probamos las frecuencias comunes en orden de calidad
-        rates_to_try = [48000, 44100, 16000]
-        
-        for rate in rates_to_try:
-            try:
-                # Intentamos "abrir" una conexión de prueba
-                print(f"Testing {rate}Hz...", end="")
-                sd.check_input_settings(device=target_id, channels=2, samplerate=rate)
-                print(" OK! ✅")
-                return target_id, rate
-            except Exception as e:
-                print(f" Fail ❌")
-        
-        print("⚠️ Ninguna frecuencia funcionó. Forzando 44100Hz como último recurso.")
-        return target_id, 44100
 
     def _listen_loop(self):
         audio_buffer = []
         is_recording = False
         silence_start = None
         
-        # --- AUTO-CONFIGURACIÓN ---
-        device_id, best_fs = self._find_best_config()
-        self.channels = 2
-        self.fs = best_fs
+        # --- CAMBIO CLAVE: device=None usa el DEFAULT del sistema ---
+        device_id = None 
         
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
@@ -105,14 +54,15 @@ class STTManager:
             return
 
         def callback(indata, frames, time, status):
-            if status: pass 
+            if status: pass
             audio_buffer.append(indata.copy())
 
         try:
+            # Al no poner device_id, usa lo que tú hayas elegido en la pantalla
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: 👂 Escuchando en ID {device_id} a {self.fs}Hz")
+                print(f"EAR: 👂 Escuchando por el canal POR DEFECTO")
                 
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
@@ -145,7 +95,8 @@ class STTManager:
                     time.sleep(0.01)
                     
         except Exception as e:
-            print(f"EAR ERROR CRÍTICO: {e}")
+            print(f"EAR ERROR: {e}")
+            print("❌ Prueba a cambiar la entrada de audio en el menú de la Raspberry.")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
