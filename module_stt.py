@@ -8,6 +8,7 @@ import io
 import os
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
+import modules.tars_status as status # <--- IMPORTAMOS EL SEMÁFORO
 
 try:
     from openai import OpenAI
@@ -22,9 +23,8 @@ class STTManager:
         self.running = False
         self.utterance_callback = None
         
-        # Usamos configuración estándar que funciona con "Default"
         self.fs = 44100 
-        self.channels = 2 # El sistema mezclará si es necesario
+        self.channels = 2 
         self.threshold = 0.03
         self.silence_limit = 1.2
         self.amp_gain = amp_gain
@@ -32,39 +32,42 @@ class STTManager:
 
     def start(self):
         self.running = True
-        queue_message("EAR: Usando micrófono por defecto del sistema...")
+        queue_message("EAR: Sistema anti-eco activado.")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
         audio_buffer = []
         is_recording = False
         silence_start = None
-        
-        # --- CAMBIO CLAVE: device=None usa el DEFAULT del sistema ---
         device_id = None 
         
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
-
-        client = None
-        if OpenAI and api_key:
-            client = OpenAI(api_key=api_key)
-        else:
-            print("EAR ERROR: No API Key")
-            return
+        client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
 
         def callback(indata, frames, time, status):
             if status: pass
             audio_buffer.append(indata.copy())
 
         try:
-            # Al no poner device_id, usa lo que tú hayas elegido en la pantalla
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
                 
-                print(f"EAR: 👂 Escuchando por el canal POR DEFECTO")
+                print(f"EAR: 👂 Escuchando (Ignorando voz propia)")
                 
                 while self.running and not self.shutdown_event.is_set():
+                    
+                    # --- FILTRO ANTI-ECO ---
+                    # Si TARS está hablando, vaciamos el buffer y no hacemos nada
+                    if status.is_speaking:
+                        if audio_buffer:
+                            audio_buffer = [] # Limpiar basura
+                            is_recording = False # Resetear grabación
+                            # print("🔇 (TARS hablando, oído desactivado)", end="\r")
+                        time.sleep(0.1)
+                        continue
+                    # -----------------------
+
                     if not audio_buffer:
                         time.sleep(0.1)
                         continue
@@ -96,7 +99,6 @@ class STTManager:
                     
         except Exception as e:
             print(f"EAR ERROR: {e}")
-            print("❌ Prueba a cambiar la entrada de audio en el menú de la Raspberry.")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
@@ -112,6 +114,11 @@ class STTManager:
                 language="es"
             )
             text = transcript.text
+            
+            # Filtro extra: Si lo que ha entendido está vacío o es muy corto
+            if not text or len(text.strip()) < 2:
+                return
+
             print(f"🗣️ TARS: '{text}'")
             if self.utterance_callback:
                 self.utterance_callback(text)
