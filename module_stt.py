@@ -21,16 +21,19 @@ class STTManager:
         self.ui_manager = ui_manager
         self.running = False
         self.utterance_callback = None
-        self.fs = 16000
-        self.channels = 1
-        self.threshold = 0.08  # Umbral alto para evitar ruido
-        self.silence_limit = 1.2
+        
+        # --- CONFIGURACIÓN PARA HAT WM8960 ---
+        self.fs = 44100      # Frecuencia nativa del HAT
+        self.channels = 2    # El HAT es Estéreo (2 micros)
+        
+        self.threshold = 0.03 # Sensibilidad (ajustar si necesario)
+        self.silence_limit = 1.5
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Conectando al HAT (Card 3)...")
+        queue_message("EAR: Inicializando Estéreo (Card 3)...")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -38,9 +41,10 @@ class STTManager:
         is_recording = False
         silence_start = None
         
-        # --- AQUÍ ESTABA EL ERROR: CAMBIAMOS 1 POR 3 ---
+        # ID DE TU TARJETA (Confirmado que es el 3)
         device_id = 3 
         
+        # Configurar cliente OpenAI
         tts_conf = self.config['TTS']
         api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
 
@@ -52,18 +56,26 @@ class STTManager:
             return
 
         def callback(indata, frames, time, status):
+            # Copiamos los datos del buffer de audio
             audio_buffer.append(indata.copy())
 
         try:
+            # ABRIMOS EL MICRO EN ESTÉREO
             with sd.InputStream(samplerate=self.fs, channels=self.channels, 
                               device=device_id, callback=callback):
-                print(f"EAR: Micrófono abierto en Card {device_id} (WM8960)")
+                
+                print(f"EAR: Micrófono abierto en Card {device_id} (Estéreo/44100Hz)")
+                
                 while self.running and not self.shutdown_event.is_set():
                     if not audio_buffer:
                         time.sleep(0.1)
                         continue
+                    
+                    # Procesamos los fragmentos de audio
                     while audio_buffer:
                         chunk = audio_buffer.pop(0)
+                        
+                        # Calculamos volumen (promedio de los 2 canales)
                         volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
                         
                         if volume > self.threshold:
@@ -74,6 +86,7 @@ class STTManager:
                             else:
                                 self.current_recording.append(chunk)
                             silence_start = None
+                        
                         elif is_recording:
                             self.current_recording.append(chunk)
                             if silence_start is None:
@@ -83,18 +96,26 @@ class STTManager:
                                 is_recording = False
                                 self._transcribe(self.current_recording, client)
                                 self.current_recording = []
+                        
                     time.sleep(0.01)
+                    
         except Exception as e:
-            print(f"EAR ERROR: {e}")
+            print(f"EAR ERROR CRÍTICO: {e}")
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
+        
+        # Unir todos los fragmentos
         recording = np.concatenate(audio_data, axis=0)
+        
+        # Guardar en memoria como WAV
         buffer = io.BytesIO()
         buffer.name = 'audio.wav'
         sf.write(buffer, recording, self.fs)
         buffer.seek(0)
+        
         try:
+            # Enviar a Whisper
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
@@ -102,8 +123,10 @@ class STTManager:
             )
             text = transcript.text
             print(f"🗣️ TARS ENTENDIÓ: '{text}'")
+            
             if self.utterance_callback:
                 self.utterance_callback(text)
+                    
         except Exception as e:
             print(f"Error Whisper: {e}")
 
