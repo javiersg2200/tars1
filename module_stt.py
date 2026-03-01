@@ -24,17 +24,18 @@ class STTManager:
         self.fs = 44100 
         self.channels = 2 
         
-        # --- AJUSTES DE CONVERSACIÓN ---
-        self.threshold = 0.08 
-        self.silence_limit = 2.0 
+        # --- AJUSTES DE TERApeuta ---
+        # Umbral muy bajo para captar las bajadas de voz entre palabras
+        self.threshold = 0.03 
+        # 2.5 segundos de pura paciencia
+        self.silence_limit = 2.5 
         
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        # Usamos print normal en lugar de la cola de mensajes que no existe
-        print("EAR: Sistema Síncrono (Conversación Fluida)")
+        print("EAR: Sistema Síncrono (Modo Paciente Activado)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -72,14 +73,18 @@ class STTManager:
                                 self.current_recording = [chunk]
                             else:
                                 self.current_recording.append(chunk)
+                                # Si estábamos contando silencio, lo cancelamos al volver a oírte
+                                if silence_start is not None:
+                                    print("🗣️ (Sigues hablando, reseteando reloj...)")
                             silence_start = None
                             
                         elif is_recording:
                             self.current_recording.append(chunk)
                             if silence_start is None:
                                 silence_start = time.time()
+                                print("⏳ (Pausa detectada, esperando 2.5s...)")
                             elif time.time() - silence_start > self.silence_limit:
-                                print("🛑 PROCESANDO...")
+                                print("🛑 PROCESANDO LA FRASE COMPLETA...")
                                 is_recording = False
                                 
                                 audio_to_send = self.current_recording.copy()
