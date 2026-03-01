@@ -24,14 +24,17 @@ class STTManager:
         
         self.fs = 44100 
         self.channels = 2 
-        self.threshold = 0.15 
+        
+        # 1. SOLUCIÓN AL GRITO: Bajamos el umbral para que te escuche hablando normal.
+        self.threshold = 0.05 
+        
         self.silence_limit = 1.0 
         self.amp_gain = amp_gain
         self.current_recording = []
 
     def start(self):
         self.running = True
-        queue_message("EAR: Sistema Anti-Cuelgues (Timeout 10s)")
+        queue_message("EAR: Sistema Síncrono (Alta Sensibilidad)")
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _listen_loop(self):
@@ -45,70 +48,67 @@ class STTManager:
                 continue
 
             try:
-                self.audio_buffer = [] 
-                
-                def callback(indata, frames, time_info, status_code):
-                    if status_code: pass
-                    self.audio_buffer.append(indata.copy())
-
+                # 2. SOLUCIÓN AL CUELGUE: Leemos el audio directamente (stream.read) 
+                # en lugar de usar procesos en segundo plano que se mueren en Linux.
                 with sd.InputStream(samplerate=self.fs, channels=self.channels, 
-                                  device=None, callback=callback):
+                                  blocksize=2048, device=None) as stream:
                     
-                    print("EAR: 👂 Oído ABIERTO y esperando...")
+                    print("EAR: 👂 Oído ABIERTO (Sensibilidad alta)...")
                     
                     is_recording = False
                     silence_start = None
+                    self.current_recording = []
                     
                     while self.running:
+                        # Si TARS tiene que hablar, salimos del bucle para apagar el micro
                         if status.is_speaking:
                             print("EAR: 🔇 TARS va a hablar -> Apagando oído...")
                             break 
 
-                        if not self.audio_buffer:
-                            time.sleep(0.05)
-                            continue
+                        # Leer el audio directamente de la tarjeta (se bloquea hasta tener datos)
+                        chunk, overflowed = stream.read(2048)
                         
-                        while self.audio_buffer:
-                            chunk = self.audio_buffer.pop(0)
-                            volume = np.linalg.norm(chunk) * self.amp_gain / len(chunk)
-                            
-                            if volume > self.threshold:
-                                if not is_recording:
-                                    print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
-                                    is_recording = True
-                                    self.current_recording = [chunk]
-                                else:
-                                    self.current_recording.append(chunk)
-                                silence_start = None
-                            
-                            elif is_recording:
+                        # Cálculo de volumen más preciso y estable
+                        volume = np.sqrt(np.mean(chunk**2)) * self.amp_gain
+                        
+                        if volume > self.threshold:
+                            if not is_recording:
+                                print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
+                                is_recording = True
+                                self.current_recording = [chunk]
+                            else:
                                 self.current_recording.append(chunk)
-                                if silence_start is None:
-                                    silence_start = time.time()
-                                elif time.time() - silence_start > self.silence_limit:
-                                    print("🛑 PROCESANDO...")
-                                    is_recording = False
-                                    
-                                    # Lanza el hilo con todo el registro para que no bloquee
-                                    threading.Thread(target=self._transcribe, 
-                                                   args=(self.current_recording, client)).start()
-                                    self.current_recording = []
-                        
-                        time.sleep(0.01)
-
+                            silence_start = None
+                            
+                        elif is_recording:
+                            self.current_recording.append(chunk)
+                            if silence_start is None:
+                                silence_start = time.time()
+                            elif time.time() - silence_start > self.silence_limit:
+                                print("🛑 PROCESANDO...")
+                                is_recording = False
+                                
+                                # Guardamos lo grabado y limpiamos para la siguiente frase
+                                audio_to_send = self.current_recording.copy()
+                                self.current_recording = []
+                                
+                                # Lo enviamos a OpenAI en un hilo para seguir escuchando si hace falta
+                                threading.Thread(target=self._transcribe, 
+                                               args=(audio_to_send, client)).start()
+                                
             except Exception as e:
-                print(f"EAR ERROR: {e}")
-                time.sleep(1) 
+                print(f"EAR ERROR DE HARDWARE: {e}")
+                time.sleep(1) # Si el driver choca, le damos 1 segundo para respirar
 
+            # Pausa obligatoria al terminar de hablar para soltar la tarjeta de sonido
             if status.is_speaking:
                 while status.is_speaking:
                     time.sleep(0.1)
-                time.sleep(0.2) 
+                time.sleep(0.5) 
 
     def _transcribe(self, audio_data, client):
         if not audio_data: return
         
-        print("⚙️ [DEBUG] Comprimiendo audio...")
         try:
             recording = np.concatenate(audio_data, axis=0)
             buffer = io.BytesIO()
@@ -116,31 +116,24 @@ class STTManager:
             sf.write(buffer, recording, self.fs)
             buffer.seek(0)
             
-            if not client:
-                print("❌ [DEBUG] ERROR: No hay cliente de OpenAI. Revisa la API KEY.")
-                return
+            if not client: return
 
-            print("☁️ [DEBUG] Enviando a OpenAI (Máximo 10s)...")
-            
-            # --- EL TIMEOUT ES LA CLAVE AQUÍ ---
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=buffer, 
                 language="es",
-                timeout=10.0 # Si en 10 segundos no hay respuesta, explota y avisa.
+                timeout=10.0
             )
             
             text = transcript.text
-            print(f"✅ [DEBUG] OpenAI respondió: '{text}'")
             
+            # Filtros anti-ruido fantasma
             if not text or len(text.strip()) < 2: return
             if "Subtítulos" in text or "Amara" in text: return
 
             print(f"🗣️ TARS: '{text}'")
             if self.utterance_callback:
                 self.utterance_callback(text)
-            else:
-                print("❌ [DEBUG] ERROR: El cerebro de TARS no está conectado al oído.")
                 
         except Exception as e:
             print(f"❌ Error Whisper: {e}")
