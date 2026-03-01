@@ -61,6 +61,5 @@ async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
         print("✅ Fin de frase.")
         status.is_speaking = False
 
-# --- ESTA ES LA FUNCIÓN QUE FALTABA ---
 def update_tts_settings(*args, **kwargs): 
     pass
