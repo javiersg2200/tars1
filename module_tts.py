@@ -1,147 +1,66 @@
 #!/usr/bin/env python3
-import threading
-import time
-import numpy as np
-import sounddevice as sd
-import soundfile as sf
-import io
 import os
+import subprocess
+from openai import OpenAI
 from modules.module_config import load_config
-from modules.module_messageQue import queue_message
 import modules.tars_status as status 
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+CONFIG = load_config()
 
-class STTManager:
-    def __init__(self, config, shutdown_event, ui_manager, amp_gain=1.0):
-        self.config = config
-        self.shutdown_event = shutdown_event
-        self.ui_manager = ui_manager
-        self.running = False
+def get_openai_client():
+    tts_conf = CONFIG['TTS']
+    api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        return OpenAI(api_key=api_key)
+    return None
+
+async def play_audio_chunks(text, tts_option=None, is_wakeword=False):
+    if not text: return
+    client = get_openai_client()
+    if not client: return
+
+    try:
+        # 1. SEMÁFORO ROJO (Apagamos el oído)
+        status.is_speaking = True 
         
-        self.fs = 44100 
-        self.channels = 2 
+        print(f"🔊 Generando voz...")
         
-        # 1. SOLUCIÓN AL GRITO: Bajamos el umbral para que te escuche hablando normal.
-        self.threshold = 0.05 
+        # 2. Pedimos el WAV a OpenAI
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=text,
+            response_format="wav" 
+        )
         
-        self.silence_limit = 1.0 
-        self.amp_gain = amp_gain
-        self.current_recording = []
-
-    def start(self):
-        self.running = True
-        queue_message("EAR: Sistema Síncrono (Alta Sensibilidad)")
-        threading.Thread(target=self._listen_loop, daemon=True).start()
-
-    def _listen_loop(self):
-        tts_conf = self.config['TTS']
-        api_key = getattr(tts_conf, 'openai_api_key', None) or os.environ.get("OPENAI_API_KEY")
-        client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
-
-        while self.running and not self.shutdown_event.is_set():
-            if status.is_speaking:
-                time.sleep(0.1)
-                continue
-
-            try:
-                # 2. SOLUCIÓN AL CUELGUE: Leemos el audio directamente (stream.read) 
-                # en lugar de usar procesos en segundo plano que se mueren en Linux.
-                with sd.InputStream(samplerate=self.fs, channels=self.channels, 
-                                  blocksize=2048, device=None) as stream:
-                    
-                    print("EAR: 👂 Oído ABIERTO (Sensibilidad alta)...")
-                    
-                    is_recording = False
-                    silence_start = None
-                    self.current_recording = []
-                    
-                    while self.running:
-                        # Si TARS tiene que hablar, salimos del bucle para apagar el micro
-                        if status.is_speaking:
-                            print("EAR: 🔇 TARS va a hablar -> Apagando oído...")
-                            break 
-
-                        # Leer el audio directamente de la tarjeta (se bloquea hasta tener datos)
-                        chunk, overflowed = stream.read(2048)
-                        
-                        # Cálculo de volumen más preciso y estable
-                        volume = np.sqrt(np.mean(chunk**2)) * self.amp_gain
-                        
-                        if volume > self.threshold:
-                            if not is_recording:
-                                print(f"🎤 VOZ DETECTADA (Vol: {volume:.4f})")
-                                is_recording = True
-                                self.current_recording = [chunk]
-                            else:
-                                self.current_recording.append(chunk)
-                            silence_start = None
-                            
-                        elif is_recording:
-                            self.current_recording.append(chunk)
-                            if silence_start is None:
-                                silence_start = time.time()
-                            elif time.time() - silence_start > self.silence_limit:
-                                print("🛑 PROCESANDO...")
-                                is_recording = False
-                                
-                                # Guardamos lo grabado y limpiamos para la siguiente frase
-                                audio_to_send = self.current_recording.copy()
-                                self.current_recording = []
-                                
-                                # Lo enviamos a OpenAI en un hilo para seguir escuchando si hace falta
-                                threading.Thread(target=self._transcribe, 
-                                               args=(audio_to_send, client)).start()
-                                
-            except Exception as e:
-                print(f"EAR ERROR DE HARDWARE: {e}")
-                time.sleep(1) # Si el driver choca, le damos 1 segundo para respirar
-
-            # Pausa obligatoria al terminar de hablar para soltar la tarjeta de sonido
-            if status.is_speaking:
-                while status.is_speaking:
-                    time.sleep(0.1)
-                time.sleep(0.5) 
-
-    def _transcribe(self, audio_data, client):
-        if not audio_data: return
+        raw_file = "speech_raw.wav"
+        ready_file = "speech_ready.wav"
         
-        try:
-            recording = np.concatenate(audio_data, axis=0)
-            buffer = io.BytesIO()
-            buffer.name = 'audio.wav'
-            sf.write(buffer, recording, self.fs)
-            buffer.seek(0)
-            
-            if not client: return
+        with open(raw_file, "wb") as f:
+            f.write(response.content)
 
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1", 
-                file=buffer, 
-                language="es",
-                timeout=10.0
-            )
-            
-            text = transcript.text
-            
-            # Filtros anti-ruido fantasma
-            if not text or len(text.strip()) < 2: return
-            if "Subtítulos" in text or "Amara" in text: return
+        # 3. CONVERSIÓN CRÍTICA: Forzamos 44100Hz y 2 Canales
+        subprocess.run(
+            f"ffmpeg -y -i {raw_file} -ar 44100 -ac 2 {ready_file} -loglevel quiet", 
+            shell=True
+        )
 
-            print(f"🗣️ TARS: '{text}'")
-            if self.utterance_callback:
-                self.utterance_callback(text)
-                
-        except Exception as e:
-            print(f"❌ Error Whisper: {e}")
+        print(f"🔊 TARS HABLANDO...")
+        
+        # 4. Reproducimos
+        subprocess.run(
+            f"aplay -D default {ready_file} -q", 
+            shell=True
+        )
 
-    def stop(self): self.running = False
-    def set_wake_word_callback(self, cb): pass
-    def set_utterance_callback(self, cb): self.utterance_callback = cb
-    def set_post_utterance_callback(self, cb): pass
-    def play_wav(self, f): pass
-    def pause(self): pass
-    def resume(self): pass
+    except Exception as e:
+        print(f"TTS ERROR: {e}")
+        
+    finally:
+        # 5. SEMÁFORO VERDE (Oído, despierta)
+        print("✅ Fin de frase.")
+        status.is_speaking = False
+
+# --- ESTA ES LA FUNCIÓN QUE FALTABA ---
+def update_tts_settings(*args, **kwargs): 
+    pass
